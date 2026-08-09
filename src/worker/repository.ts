@@ -10,6 +10,7 @@ export interface NotesRepository {
 	health(): Promise<void>;
 	list(): Promise<Note[]>;
 	create(body: string): Promise<Note>;
+	cleanup(): Promise<void>;
 }
 
 interface NoteRow extends RowDataPacket {
@@ -17,15 +18,6 @@ interface NoteRow extends RowDataPacket {
 	body: string;
 	createdAt: Date | string;
 }
-
-const schema = `
-	CREATE TABLE IF NOT EXISTS notes (
-		id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-		body VARCHAR(280) NOT NULL,
-		created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-		PRIMARY KEY (id)
-	)
-`;
 
 function serialize(row: NoteRow): Note {
 	return {
@@ -35,8 +27,37 @@ function serialize(row: NoteRow): Note {
 	};
 }
 
+export function tableNameFor(namespace: string): string {
+	if (!/^pr_[1-9][0-9]*$/.test(namespace)) {
+		throw new Error(`Invalid preview database namespace: ${namespace}`);
+	}
+	return `preview_notes_${namespace}`;
+}
+
 export class PlanetScaleNotesRepository implements NotesRepository {
-	constructor(private readonly hyperdrive: Hyperdrive) {}
+	private readonly tableName: string;
+
+	constructor(
+		private readonly hyperdrive: Hyperdrive,
+		namespace: string,
+	) {
+		this.tableName = tableNameFor(namespace);
+	}
+
+	private get quotedTableName(): string {
+		return `\`${this.tableName}\``;
+	}
+
+	private async ensureSchema(connection: Connection): Promise<void> {
+		await connection.query(`
+			CREATE TABLE IF NOT EXISTS ${this.quotedTableName} (
+				id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+				body VARCHAR(280) NOT NULL,
+				created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+				PRIMARY KEY (id)
+			)
+		`);
+	}
 
 	private async connect(): Promise<Connection> {
 		return createConnection({
@@ -66,9 +87,9 @@ export class PlanetScaleNotesRepository implements NotesRepository {
 
 	async list(): Promise<Note[]> {
 		return this.withConnection(async (connection) => {
-			await connection.query(schema);
+			await this.ensureSchema(connection);
 			const [rows] = await connection.query<NoteRow[]>(
-				"SELECT CAST(id AS CHAR) AS id, body, created_at AS createdAt FROM notes ORDER BY id DESC LIMIT 50",
+				`SELECT CAST(id AS CHAR) AS id, body, created_at AS createdAt FROM ${this.quotedTableName} ORDER BY id DESC LIMIT 50`,
 			);
 			return rows.map(serialize);
 		});
@@ -76,15 +97,24 @@ export class PlanetScaleNotesRepository implements NotesRepository {
 
 	async create(body: string): Promise<Note> {
 		return this.withConnection(async (connection) => {
-			await connection.query(schema);
-			const [result] = await connection.execute<ResultSetHeader>("INSERT INTO notes (body) VALUES (?)", [body]);
+			await this.ensureSchema(connection);
+			const [result] = await connection.execute<ResultSetHeader>(
+				`INSERT INTO ${this.quotedTableName} (body) VALUES (?)`,
+				[body],
+			);
 			const [rows] = await connection.execute<NoteRow[]>(
-				"SELECT CAST(id AS CHAR) AS id, body, created_at AS createdAt FROM notes WHERE id = ?",
+				`SELECT CAST(id AS CHAR) AS id, body, created_at AS createdAt FROM ${this.quotedTableName} WHERE id = ?`,
 				[result.insertId],
 			);
 			const note = rows[0];
 			if (!note) throw new Error("Inserted note could not be read back");
 			return serialize(note);
+		});
+	}
+
+	async cleanup(): Promise<void> {
+		await this.withConnection(async (connection) => {
+			await connection.query(`DROP TABLE IF EXISTS ${this.quotedTableName}`);
 		});
 	}
 }

@@ -10,6 +10,7 @@ interface Hyperdrive {
 interface Env {
 	HYPERDRIVE: Hyperdrive;
 	DEPLOYMENT_ENV: string;
-	PLANETSCALE_BRANCH: string;
+	DATABASE_NAMESPACE: string;
 	COMMIT_SHA: string;
+	PREVIEW_CLEANUP_TOKEN: string;
 }

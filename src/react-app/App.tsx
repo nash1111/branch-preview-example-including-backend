@@ -10,7 +10,7 @@ interface Health {
 	ok: boolean;
 	stack: string;
 	deployment: string;
-	databaseBranch: string;
+	databaseNamespace: string;
 	commitSha: string;
 }
 
@@ -72,14 +72,14 @@ export default function App() {
 			<section className="hero">
 				<p className="eyebrow">FULL-STACK BRANCH PREVIEW</p>
 				<h1>Preview Notes</h1>
-				<p className="lead">この画面、Hono API、PlanetScaleデータはすべてPR専用です。</p>
+				<p className="lead">この画面、Hono API、PlanetScaleのDB namespaceはすべてPR専用です。</p>
 			</section>
 
 			<section className="status" aria-label="deployment status">
 				<span className={health?.ok ? "dot online" : "dot"} />
 				<div>
 					<strong>{health?.ok ? "Connected" : "Connecting…"}</strong>
-					<small>{health?.databaseBranch ?? "PlanetScale branch"}</small>
+					<small>{health?.databaseNamespace ?? "PlanetScale namespace"}</small>
 				</div>
 				<code>{health?.commitSha.slice(0, 7) ?? "-------"}</code>
 			</section>

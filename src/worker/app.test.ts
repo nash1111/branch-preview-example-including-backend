@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "./app";
-import type { Note, NotesRepository } from "./repository";
+import { tableNameFor, type Note, type NotesRepository } from "./repository";
 
 class MemoryRepository implements NotesRepository {
 	private notes: Note[] = [];
@@ -16,21 +16,26 @@ class MemoryRepository implements NotesRepository {
 		this.notes.push(note);
 		return note;
 	}
+
+	async cleanup() {
+		this.notes = [];
+	}
 }
 
 const env = {
 	DEPLOYMENT_ENV: "test",
-	PLANETSCALE_BRANCH: "pr-test",
+	DATABASE_NAMESPACE: "pr_123",
 	COMMIT_SHA: "abc123",
+	PREVIEW_CLEANUP_TOKEN: "cleanup-test-token",
 } as Env;
 
 describe("notes API", () => {
-	it("reports deployment and database branch metadata", async () => {
+	it("reports deployment and database namespace metadata", async () => {
 		const app = createApp(() => new MemoryRepository());
 		const response = await app.request("/api/health", {}, env);
 
 		expect(response.status).toBe(200);
-		expect(await response.json()).toMatchObject({ ok: true, deployment: "test", databaseBranch: "pr-test" });
+		expect(await response.json()).toMatchObject({ ok: true, deployment: "test", databaseNamespace: "pr_123" });
 	});
 
 	it("creates and lists notes", async () => {
@@ -58,5 +63,27 @@ describe("notes API", () => {
 		);
 
 		expect(response.status).toBe(400);
+	});
+
+	it("cleans up only with the preview token", async () => {
+		const repository = new MemoryRepository();
+		await repository.create("temporary");
+		const app = createApp(() => repository);
+
+		const denied = await app.request("/api/preview-data", { method: "DELETE" }, env);
+		expect(denied.status).toBe(404);
+
+		const cleaned = await app.request(
+			"/api/preview-data",
+			{ method: "DELETE", headers: { authorization: "Bearer cleanup-test-token" } },
+			env,
+		);
+		expect(cleaned.status).toBe(200);
+		expect(await repository.list()).toEqual([]);
+	});
+
+	it("accepts only PR-scoped database namespaces", () => {
+		expect(tableNameFor("pr_42")).toBe("preview_notes_pr_42");
+		expect(() => tableNameFor("main; DROP TABLE notes")).toThrow("Invalid preview database namespace");
 	});
 });
