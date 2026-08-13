@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "./app";
-import { tableNameFor, type Note, type NotesRepository } from "./repository";
+import { validateNamespace, type Note, type NotesRepository } from "./repository";
 
 class MemoryRepository implements NotesRepository {
 	private notes: Note[] = [];
@@ -83,7 +83,7 @@ describe("notes API", () => {
 	});
 
 	it("accepts only PR-scoped database namespaces", () => {
-		expect(tableNameFor("pr_42")).toBe("preview_notes_pr_42");
-		expect(() => tableNameFor("main; DROP TABLE notes")).toThrow("Invalid preview database namespace");
+		expect(validateNamespace("pr_42")).toBe("pr_42");
+		expect(() => validateNamespace("main; DROP TABLE notes")).toThrow("Invalid preview database namespace");
 	});
 });
