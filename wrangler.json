@@ -1,0 +1,18 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "branch-preview-example",
+	"account_id": "77d31ec7cf644c489ff4a05f71d9eefb",
+	"main": "./src/worker/index.ts",
+	"compatibility_date": "2026-08-09",
+	"compatibility_flags": ["nodejs_compat"],
+	"preview_urls": true,
+	"workers_dev": true,
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	"assets": {
+		"directory": "./dist/client",
+		"not_found_handling": "single-page-application"
+	}
+}

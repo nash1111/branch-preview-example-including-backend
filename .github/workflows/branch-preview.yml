@@ -23,12 +23,9 @@ env:
   CLOUDFLARE_ACCOUNT_ID: 77d31ec7cf644c489ff4a05f71d9eefb
   WORKER_NAME: branch-preview-example
   PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
-  PSCALE_BRANCH: pr-${{ github.event.pull_request.number || inputs.pr_number }}
+  DATABASE_NAMESPACE: pr_${{ github.event.pull_request.number || inputs.pr_number }}
   PREVIEW_ALIAS: pr-${{ github.event.pull_request.number || inputs.pr_number }}
-  HYPERDRIVE_NAME: branch-preview-pr-${{ github.event.pull_request.number || inputs.pr_number }}
-  PASSWORD_NAME: github-pr-${{ github.event.pull_request.number || inputs.pr_number }}
-  PLANETSCALE_ORG_NAME: ${{ vars.PLANETSCALE_ORG_NAME }}
-  PLANETSCALE_DATABASE_NAME: ${{ vars.PLANETSCALE_DATABASE_NAME }}
+  HYPERDRIVE_ID: ${{ vars.CLOUDFLARE_PLANETSCALE_HYPERDRIVE_ID }}
 
 jobs:
   preview:
@@ -46,16 +43,13 @@ jobs:
           node-version: 24
           cache: npm
 
-      - uses: planetscale/setup-pscale-action@v1
-
       - name: Verify preview configuration
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PLANETSCALE_SERVICE_TOKEN_ID }}
-          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PLANETSCALE_SERVICE_TOKEN }}
+          PREVIEW_CLEANUP_TOKEN: ${{ secrets.PREVIEW_CLEANUP_TOKEN }}
         run: |
           set -euo pipefail
-          for name in CLOUDFLARE_API_TOKEN PLANETSCALE_SERVICE_TOKEN_ID PLANETSCALE_SERVICE_TOKEN PLANETSCALE_ORG_NAME PLANETSCALE_DATABASE_NAME; do
+          for name in CLOUDFLARE_API_TOKEN PREVIEW_CLEANUP_TOKEN HYPERDRIVE_ID; do
             if [ -z "${!name:-}" ]; then
               echo "::error::$name is not configured"
               exit 1
@@ -64,105 +58,35 @@ jobs:
 
       - name: Install and validate
         run: |
+          echo "PREVIEW_COMMIT_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           npm ci
           npm run check
-
-      - name: Create isolated PlanetScale branch
-        env:
-          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PLANETSCALE_SERVICE_TOKEN_ID }}
-          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PLANETSCALE_SERVICE_TOKEN }}
-        run: |
-          set -euo pipefail
-          if pscale branch show "$PLANETSCALE_DATABASE_NAME" "$PSCALE_BRANCH" --org "$PLANETSCALE_ORG_NAME" >/dev/null 2>&1; then
-            echo "PlanetScale branch $PSCALE_BRANCH already exists"
-          else
-            pscale branch create "$PLANETSCALE_DATABASE_NAME" "$PSCALE_BRANCH" \
-              --from main --wait --org "$PLANETSCALE_ORG_NAME"
-          fi
-
-      - name: Create branch credentials
-        id: database
-        env:
-          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PLANETSCALE_SERVICE_TOKEN_ID }}
-          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PLANETSCALE_SERVICE_TOKEN }}
-        run: |
-          set -euo pipefail
-          pscale password delete "$PLANETSCALE_DATABASE_NAME" "$PSCALE_BRANCH" \
-            --name "$PASSWORD_NAME" --force --org "$PLANETSCALE_ORG_NAME" >/dev/null 2>&1 || true
-
-          response=$(pscale password create "$PLANETSCALE_DATABASE_NAME" "$PSCALE_BRANCH" "$PASSWORD_NAME" \
-            --role admin --format json --org "$PLANETSCALE_ORG_NAME")
-          host=$(jq -r '.access_host_url' <<<"$response")
-          username=$(jq -r '.username' <<<"$response")
-          password=$(jq -r '.plain_text' <<<"$response")
-          if [ -z "$host" ] || [ -z "$username" ] || [ -z "$password" ] || [ "$password" = "null" ]; then
-            echo "::error::PlanetScale did not return usable credentials"
-            exit 1
-          fi
-          echo "::add-mask::$username"
-          echo "::add-mask::$password"
-          echo "host=$host" >> "$GITHUB_OUTPUT"
-          echo "username=$username" >> "$GITHUB_OUTPUT"
-          echo "password=$password" >> "$GITHUB_OUTPUT"
-
-      - name: Create isolated Hyperdrive configuration
-        id: hyperdrive
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          DATABASE_HOST: ${{ steps.database.outputs.host }}
-          DATABASE_USER: ${{ steps.database.outputs.username }}
-          DATABASE_PASSWORD: ${{ steps.database.outputs.password }}
-        run: |
-          set -euo pipefail
-          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/hyperdrive/configs"
-          list=$(curl --fail-with-body --silent --show-error \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api")
-          existing_id=$(jq -r --arg name "$HYPERDRIVE_NAME" '.result[]? | select(.name == $name) | .id' <<<"$list" | head -n 1)
-          if [ -n "$existing_id" ]; then
-            curl --fail-with-body --silent --show-error -X DELETE \
-              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/$existing_id" >/dev/null
-          fi
-
-          payload=$(jq -n \
-            --arg name "$HYPERDRIVE_NAME" \
-            --arg host "$DATABASE_HOST" \
-            --arg database "$PLANETSCALE_DATABASE_NAME" \
-            --arg user "$DATABASE_USER" \
-            --arg password "$DATABASE_PASSWORD" \
-            '{name: $name, origin: {scheme: "mysql", host: $host, port: 3306, database: $database, user: $user, password: $password}, caching: {disabled: true}}')
-          created=$(curl --fail-with-body --silent --show-error \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data "$payload" "$api")
-          hyperdrive_id=$(jq -r 'if .success then .result.id else empty end' <<<"$created")
-          if [ -z "$hyperdrive_id" ]; then
-            echo "::error::Cloudflare did not create the Hyperdrive configuration"
-            jq '{success, errors}' <<<"$created"
-            exit 1
-          fi
-          echo "id=$hyperdrive_id" >> "$GITHUB_OUTPUT"
 
       - name: Upload full-stack Worker preview
         id: deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          HYPERDRIVE_ID: ${{ steps.hyperdrive.outputs.id }}
+          PREVIEW_CLEANUP_TOKEN: ${{ secrets.PREVIEW_CLEANUP_TOKEN }}
         run: |
           set -euo pipefail
           preview_config="dist/branch_preview_example/wrangler.preview.json"
+          secrets_file="$RUNNER_TEMP/preview-secrets.json"
           jq \
             --arg id "$HYPERDRIVE_ID" \
             --arg deployment "pull-request-$PR_NUMBER" \
-            --arg branch "$PSCALE_BRANCH" \
-            --arg sha "$GITHUB_SHA" \
+            --arg namespace "$DATABASE_NAMESPACE" \
+            --arg sha "$PREVIEW_COMMIT_SHA" \
             '.hyperdrive = [{binding: "HYPERDRIVE", id: $id}] |
-             .vars = {DEPLOYMENT_ENV: $deployment, PLANETSCALE_BRANCH: $branch, COMMIT_SHA: $sha} |
+             .vars = {DEPLOYMENT_ENV: $deployment, DATABASE_NAMESPACE: $namespace, COMMIT_SHA: $sha} |
+             .secrets = {required: ["PREVIEW_CLEANUP_TOKEN"]} |
              .placement = {mode: "smart"}' \
             dist/branch_preview_example/wrangler.json > "$preview_config"
+          jq -n --arg token "$PREVIEW_CLEANUP_TOKEN" '{PREVIEW_CLEANUP_TOKEN: $token}' > "$secrets_file"
 
           npx wrangler versions upload --config "$preview_config" \
+            --secrets-file "$secrets_file" \
             --preview-alias "$PREVIEW_ALIAS" \
-            --message "PR #$PR_NUMBER at $GITHUB_SHA"
+            --message "PR #$PR_NUMBER at $PREVIEW_COMMIT_SHA"
 
           subdomain_response=$(curl --fail-with-body --silent --show-error \
             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
@@ -176,10 +100,16 @@ jobs:
           PREVIEW_URL: ${{ steps.deploy.outputs.url }}
         run: |
           set -euo pipefail
+          marker="smoke-${PREVIEW_COMMIT_SHA:0:12}"
           for attempt in $(seq 1 18); do
             if curl --fail --silent --show-error "$PREVIEW_URL/" >/dev/null && \
-              curl --fail --silent --show-error "$PREVIEW_URL/api/health" | jq -e --arg branch "$PSCALE_BRANCH" '.ok == true and .databaseBranch == $branch' >/dev/null && \
-              curl --fail --silent --show-error "$PREVIEW_URL/api/notes" | jq -e '.notes | type == "array"' >/dev/null; then
+              curl --fail --silent --show-error "$PREVIEW_URL/api/health" | jq -e \
+                --arg namespace "$DATABASE_NAMESPACE" \
+                --arg sha "$PREVIEW_COMMIT_SHA" \
+                '.ok == true and .databaseNamespace == $namespace and .commitSha == $sha' >/dev/null && \
+              curl --fail --silent --show-error -X POST -H 'Content-Type: application/json' \
+                --data "$(jq -cn --arg body "$marker" '{body: $body}')" "$PREVIEW_URL/api/notes" | jq -e --arg marker "$marker" '.note.body == $marker' >/dev/null && \
+              curl --fail --silent --show-error "$PREVIEW_URL/api/notes" | jq -e --arg marker "$marker" '.notes | any(.body == $marker)' >/dev/null; then
               exit 0
             fi
             sleep 5
@@ -196,7 +126,7 @@ jobs:
             const deployment = await github.rest.repos.createDeployment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              ref: context.sha,
+              ref: process.env.PREVIEW_COMMIT_SHA,
               environment: `pr-${process.env.PR_NUMBER}`,
               auto_merge: false,
               required_contexts: [],
@@ -218,7 +148,7 @@ jobs:
         with:
           script: |
             const marker = "<!-- full-stack-branch-preview -->";
-            const body = `${marker}\n## Full-stack branch preview\n\n✅ **[Open preview](${process.env.PREVIEW_URL})**\n\n- Worker alias: \`${process.env.PREVIEW_ALIAS}\`\n- PlanetScale branch: \`${process.env.PSCALE_BRANCH}\`\n- Database path: React → Hono → Cloudflare Hyperdrive → PlanetScale\n- Commit: \`${context.sha.slice(0, 7)}\``;
+            const body = `${marker}\n## Full-stack branch preview\n\n✅ **[Open preview](${process.env.PREVIEW_URL})**\n\n- Worker alias: \`${process.env.PREVIEW_ALIAS}\`\n- PlanetScale namespace: \`${process.env.DATABASE_NAMESPACE}\`\n- Authentication: Cloudflare only\n- Database path: React → Hono → Cloudflare Hyperdrive → Cloudflare-managed PlanetScale\n- Commit: \`${process.env.PREVIEW_COMMIT_SHA.slice(0, 7)}\``;
             const issue_number = Number(process.env.PR_NUMBER);
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner: context.repo.owner,
@@ -239,27 +169,17 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
-      - uses: planetscale/setup-pscale-action@v1
-
-      - name: Delete preview Hyperdrive
+      - name: Delete isolated preview data
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PREVIEW_CLEANUP_TOKEN: ${{ secrets.PREVIEW_CLEANUP_TOKEN }}
         run: |
           set -euo pipefail
-          api="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/hyperdrive/configs"
-          list=$(curl --fail-with-body --silent --show-error -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api")
-          hyperdrive_id=$(jq -r --arg name "$HYPERDRIVE_NAME" '.result[]? | select(.name == $name) | .id' <<<"$list" | head -n 1)
-          if [ -n "$hyperdrive_id" ]; then
-            curl --fail-with-body --silent --show-error -X DELETE \
-              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/$hyperdrive_id" >/dev/null
-          fi
-
-      - name: Delete preview PlanetScale branch
-        env:
-          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PLANETSCALE_SERVICE_TOKEN_ID }}
-          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PLANETSCALE_SERVICE_TOKEN }}
-        run: |
-          set -euo pipefail
-          if pscale branch show "$PLANETSCALE_DATABASE_NAME" "$PSCALE_BRANCH" --org "$PLANETSCALE_ORG_NAME" >/dev/null 2>&1; then
-            pscale branch delete "$PLANETSCALE_DATABASE_NAME" "$PSCALE_BRANCH" --force --org "$PLANETSCALE_ORG_NAME"
-          fi
+          subdomain_response=$(curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain")
+          subdomain=$(jq -r '.result.subdomain' <<<"$subdomain_response")
+          preview_url="https://$PREVIEW_ALIAS-$WORKER_NAME.$subdomain.workers.dev"
+          curl --fail-with-body --silent --show-error -X DELETE \
+            -H "Authorization: Bearer $PREVIEW_CLEANUP_TOKEN" \
+            "$preview_url/api/preview-data" | jq -e --arg namespace "$DATABASE_NAMESPACE" '.ok == true and .databaseNamespace == $namespace' >/dev/null
