@@ -103,7 +103,10 @@ jobs:
           marker="smoke-${PREVIEW_COMMIT_SHA:0:12}"
           for attempt in $(seq 1 18); do
             if curl --fail --silent --show-error "$PREVIEW_URL/" >/dev/null && \
-              curl --fail --silent --show-error "$PREVIEW_URL/api/health" | jq -e --arg namespace "$DATABASE_NAMESPACE" '.ok == true and .databaseNamespace == $namespace' >/dev/null && \
+              curl --fail --silent --show-error "$PREVIEW_URL/api/health" | jq -e \
+                --arg namespace "$DATABASE_NAMESPACE" \
+                --arg sha "$PREVIEW_COMMIT_SHA" \
+                '.ok == true and .databaseNamespace == $namespace and .commitSha == $sha' >/dev/null && \
               curl --fail --silent --show-error -X POST -H 'Content-Type: application/json' \
                 --data "$(jq -cn --arg body "$marker" '{body: $body}')" "$PREVIEW_URL/api/notes" | jq -e --arg marker "$marker" '.note.body == $marker' >/dev/null && \
               curl --fail --silent --show-error "$PREVIEW_URL/api/notes" | jq -e --arg marker "$marker" '.notes | any(.body == $marker)' >/dev/null; then
